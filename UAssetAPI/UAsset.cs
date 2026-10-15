@@ -683,9 +683,6 @@ namespace UAssetAPI
             string pathPrefixPart = path.Substring(firstIdxWithoutSlash, secondIdxWithoutSlash - firstIdxWithoutSlash - 1);
             string pathNoPrefix = path.Substring(secondIdxWithoutSlash) + ".uasset";
 
-            string mappedPathOnDisk = string.Empty;
-            bool foundMappedPath = false;
-
             string desiredPathRelativeToContent = null;
             switch (pathPrefixPart)
             {
@@ -698,42 +695,72 @@ namespace UAssetAPI
                     break;
             }
 
+            if (string.IsNullOrEmpty(FilePath)) return null;
+
+            var fixedFilePath = FilePath.FixDirectorySeparatorsForDisk();
             var contentPart = Path.DirectorySeparatorChar + "Content";
             var pluginsPart = Path.DirectorySeparatorChar + "Plugins";
-            if (!string.IsNullOrEmpty(FilePath))
+            int pluginsIndex = IndexOfDirectorySegment(fixedFilePath, pluginsPart);
+
+            // A Plugins directory re-orients onto the Content folder beside it, and that
+            // anchor stays first. A Content folder inside the plugin is not the /Game root.
+            if (pluginsIndex > 0)
             {
-                var fixedFilePath = FilePath.FixDirectorySeparatorsForDisk();
-                var contentIndex = fixedFilePath.LastIndexOf(contentPart);
-                var pluginsIndex = fixedFilePath.LastIndexOf(pluginsPart);
-
-                // let's see if the current path has Content in it, then we can re-orient ourselves
-                string contentDir = null;
-                if (!foundMappedPath && contentIndex > 0)
-                {
-                    contentDir = fixedFilePath.Substring(0, contentIndex + contentPart.Length);
-                }
-
-                // let's see if the current path has Plugins in it, then we can re-orient ourselves
-                if (!foundMappedPath && pluginsIndex > 0)
-                {
-                    contentDir = fixedFilePath.Substring(0, pluginsIndex + pluginsPart.Length) + Path.DirectorySeparatorChar + ".." + Path.DirectorySeparatorChar + "Content";
-                }
-
-                if (contentDir != null)
-                {
-                    mappedPathOnDisk = Path.Combine(contentDir, desiredPathRelativeToContent);
-                    foundMappedPath = File.Exists(mappedPathOnDisk); // not worrying too much about race condition, we put a try catch later in the code
-                }
-
-                if (!foundMappedPath)
-                {
-                    // let's see if it exists in the same directory
-                    mappedPathOnDisk = Path.Combine(Directory.GetParent(FilePath).FullName, Path.GetFileName(pathNoPrefix));
-                    foundMappedPath = File.Exists(mappedPathOnDisk);
-                }
+                string pluginContentDir = fixedFilePath.Substring(0, pluginsIndex + pluginsPart.Length) + Path.DirectorySeparatorChar + ".." + Path.DirectorySeparatorChar + "Content";
+                string pluginMapped = Path.Combine(pluginContentDir, desiredPathRelativeToContent);
+                if (File.Exists(pluginMapped)) return pluginMapped;
             }
 
-            return foundMappedPath ? mappedPathOnDisk : null;
+            // The rightmost directory named Content is the project root only when no folder
+            // under it is also named Content. Cooked trees (Clair Obscur does this) use
+            // Content as an ordinary path segment, and anchoring only on the inner one
+            // looks for every dependency inside that folder. Walk from the innermost
+            // Content outward. Taking the first Content in the path is the wrong default:
+            // an extract whose parent folder is also named Content would resolve against
+            // that parent even when the project root is further in.
+            int searchFrom = fixedFilePath.Length;
+            while (searchFrom > 0)
+            {
+                int contentIndex = fixedFilePath.LastIndexOf(contentPart, searchFrom - 1);
+                if (contentIndex < 0) break;
+                searchFrom = contentIndex;
+                if (contentIndex <= 0) continue;
+                if (!IsDirectorySegment(fixedFilePath, contentIndex, contentPart)) continue;
+                if (pluginsIndex > 0 && contentIndex > pluginsIndex) continue;
+
+                string contentDir = fixedFilePath.Substring(0, contentIndex + contentPart.Length);
+                string mappedPathOnDisk = Path.Combine(contentDir, desiredPathRelativeToContent);
+                if (File.Exists(mappedPathOnDisk)) return mappedPathOnDisk;
+            }
+
+            // let's see if it exists in the same directory
+            string sameDirectory = Path.Combine(Directory.GetParent(FilePath).FullName, Path.GetFileName(pathNoPrefix));
+            if (File.Exists(sameDirectory)) return sameDirectory;
+            return null;
+        }
+
+        /// <summary>
+        /// Index of <paramref name="segmentWithSeparator"/> (for example <c>\Content</c>) when it
+        /// names a real directory, not a prefix of a longer segment such as <c>\ContentBrowser</c>.
+        /// Returns -1 when no such segment exists. The rightmost match wins.
+        /// </summary>
+        private static int IndexOfDirectorySegment(string path, string segmentWithSeparator)
+        {
+            int searchFrom = path.Length;
+            while (searchFrom > 0)
+            {
+                int index = path.LastIndexOf(segmentWithSeparator, searchFrom - 1);
+                if (index < 0) return -1;
+                if (index > 0 && IsDirectorySegment(path, index, segmentWithSeparator)) return index;
+                searchFrom = index;
+            }
+            return -1;
+        }
+
+        private static bool IsDirectorySegment(string path, int separatorIndex, string segmentWithSeparator)
+        {
+            int after = separatorIndex + segmentWithSeparator.Length;
+            return after == path.Length || path[after] == Path.DirectorySeparatorChar;
         }
 
         /// <summary>
